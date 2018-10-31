@@ -1,0 +1,24 @@
+	NAS score (0-8)	Diagnosis (1=Definite NASH (5-8), 2=Borderline (3-4), 3=Not NASH (0-2); ref: Kleiner)	Steatosis grade (0-3)	Lobular Inflammation grade (0-3)	Portal inflammation (0=none, 1=present)	Ballooning hepatocytes grade (0-2)	Fibrosis stage (0-4)	Cirrhosis presence (0=no, 1=yes)	Metabolon
+L001	5	1	2	2	1	1	1	0	yes
+L002	7	1	3	2	1	2	3	0	yes
+L006	6	1	2	2	1	2	3	0	yes
+L011	5	1	2	2	1	1	2	0	yes
+L018	7	1	3	2	1	2	1	0	yes
+L039	4	2	1	2	1	1	2	0	yes
+L041	7	1	3	2	1	2	2	0	yes
+L051	3	2	1	1	1	1	2	0	yes
+L063	5	1	2	2	1	1	3	0	yes
+L066	3	2	1	1	1	1	1	0	yes
+L069	5	1	1	2	1	2	2	0	yes
+L077	5	1	2	2	1	1	1	0	yes
+L079	4	2	2	1	1	1	4	1	yes
+L089	3	2	1	1	1	1	3	0	yes
+L104	7	1	3	2	1	2	3	0	yes
+L108	5	1	3	1	1	1	2	0	yes
+L111	6	1	2	2	1	2	3	0	yes
+L113	6	1	2	2	1	2	2	0	no
+L117	4	2	2	1	1	1	1	0	yes
+L118	5	1	2	2	1	1	3	0	yes
+L119	5	1	2	2	1	1	1	0	no
+L093	2	3	1	0	1	1	1	0	yes
+L105	2	3	0	1	0	1	1	0	yes

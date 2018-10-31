@@ -1,0 +1,7 @@
+metadata_variable	type	baseline	useForPERMANOVA	useForLCA	useForNB
+SampleType2	factor		no		yes
+StudyID	character		no		no
+Cohort	ordered	NMLBMI,ObeseNML,NAFLD,NASH	yes		yes
+BMI	numeric		yes		no
+Age	numeric		yes		no
+Gender	factor	F	yes		no
