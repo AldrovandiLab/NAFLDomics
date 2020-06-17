@@ -1,6 +1,5 @@
 #!/usr/bin/Rscript
 
-library(biom)
 library(ggplot2)
 library(ape)
 library(plyr)
@@ -24,6 +23,7 @@ library(metagenomeSeq)
 library(stringi)
 library(Rtsne)
 library(ggfortify)
+library(mixOmics)
 
 source("mcc.R")
 source("utils.R")
@@ -35,7 +35,7 @@ alpha_metrics <- c("Chao1", "Shannon", "Simpson", "Observed")
 
 #########################################################################################################
 ## load mapping files
-mapping <- read.table(sprintf("%s/Kathy_NAFLD_Mapping.combined.txt", data_dir), header=T, as.is=T, sep="\t", comment.char="", row.names=1)
+mapping <- read.table(sprintf("%s/NAFLDomics_Mapping.combined.txt", data_dir), header=T, as.is=T, sep="\t", comment.char="", row.names=1)
 metadata <- read.delim(sprintf("%s/metadata.052218.txt", data_dir), header=T, sep="\t", comment.char=""); colnames(metadata)[1] <- "StudyID"
 # impute missing BMI values
 metadata$BMI....kg.m.2. <- as.numeric(as.character(metadata$BMI....kg.m.2.))
@@ -130,6 +130,8 @@ cols <- colorRampPalette(c("white", "red"), space = "rgb")
 cols.sig <- c("black", "red", "grey"); names(cols.sig) <- c("ns", "sig", "NA")
 cols.cohort <- c("#888888", "orange", "red", "#a400a4"); names(cols.cohort) <- c("NMLBMI", "ObeseNML", "NAFLD", "NASH")
 
+out_pdf <- sprintf("%s/phyloseq_output.%s.%s.pdf", out_dir, "NAFLDomics", format(Sys.Date(), "%m%d%y"))
+pdf(out_pdf, width=12)
 
 ##########################################################################################################################
 ## 16S analysis
@@ -567,7 +569,7 @@ for (st in c("fecal", "plasma")) {
 			inds <- order(importance.mean, decreasing=T)
 			inds <- inds[1:min(30, length(which(importance.mean[inds] > 0.001)))] # edit as appropriate
 			res.sig[[length(res.sig)+1]] <- names(importance.mean[inds])
-			write.table(melt(importance.mean[inds]), file=sprintf("/Lab_Share/Kathy_NAFLD/combined/phyloseq/randomForest_METABOLITE.%s_%s.%s.features.txt", mvar_level, mlevel, st), quote=F, sep="\t", row.names=T, col.names=F)
+			write.table(melt(importance.mean[inds]), file=sprintf("%s/randomForest_METABOLITE.%s_%s.%s.features.txt", out_dir, mvar_level, mlevel, st), quote=F, sep="\t", row.names=T, col.names=F)
 
 			## after running for the first time, COMMENT OUT THIS BLOCK ##
 			# using a sparse model with N predictors
@@ -1033,6 +1035,82 @@ for (st in c("fecal", "plasma")) {
 }
 
 
+
+## PLS-DA classification of Cohort (multiclass); using plasma METABOLITE data
+set.seed(112817)
+nrepeats <- 500
+ncomps <- 5
+
+# no looping for PLS-DA/sPLS-DA as need to manually tune parameters
+# plasma BIOCHEMICAL
+st <- "plasma"; mlevel <- "BIOCHEMICAL"
+data <- df.metabolon[[st]][[mlevel]]
+mapping.sel <- subset(as(sample_data(ps.relative), "data.frame"), StudyID %in% rownames(data))
+data.sel <- as.data.frame(data)
+response <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Cohort"]); names(response) <- rownames(data.sel)
+data.sel$BMI <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "BMI"])
+data.sel$Age <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Age"])
+data.sel$Sex <- as.numeric(unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Sex"]))
+agg.melt.stored <- melt(as.matrix(data.sel[, setdiff(colnames(data.sel), "Sex")]), as.is=T); colnames(agg.melt.stored) <- c("SampleID", "metabolite", "value")
+data.sel <- as.matrix(data.sel)
+# PLS-DA
+plsda.res <- plsda(data.sel, response, ncomp = ncomps) # where ncomp is the number of components wanted
+perf.plsda <- perf(plsda.res, validation = "Mfold", folds = 5, progressBar = FALSE, auc = TRUE, nrepeat = nrepeats)
+plot(perf.plsda, sd = TRUE, legend.position = "horizontal")
+plotIndiv(plsda.res, comp = 1:2, group = plsda.res$Y, ind.names = FALSE, ellipse = TRUE, legend = TRUE, title=sprintf("PLS-DA (%s, %s)", st, mlevel))
+plotIndiv(plsda.res, comp = 1:2, group = plsda.res$Y, ind.names = FALSE, ellipse = TRUE, star = TRUE, legend = TRUE, title=sprintf("PLS-DA (%s, %s)", st, mlevel))
+background <- background.predict(plsda.res, comp.predicted=2, dist = "max.dist") 
+plotIndiv(plsda.res, comp = 1:2, group = response, ind.names = FALSE, title = sprintf("PLS-DA (%s, %s)", st, mlevel), legend = TRUE,  background = background)
+# sPLS-DA
+list.keepX <- c(1:10,  seq(from=20, to=100, by=10))
+tune.splsda.multiclass <- tune.splsda(data.sel, response, ncomp = ncomps, validation = 'Mfold', folds = 5, progressBar = TRUE, dist = 'max.dist', measure = "BER", test.keepX = list.keepX, nrepeat = nrepeats, cpus = 16)
+error <- tune.splsda.multiclass$error.rate
+ncomp <- tune.splsda.multiclass$choice.ncomp$ncomp # optimal number of components based on t-tests on the error rate
+ncomp
+select.keepX <- tune.splsda.multiclass$choice.keepX[1:ncomp]  # optimal number of variables to select
+select.keepX
+plot(tune.splsda.multiclass)
+splsda.final <- splsda(data.sel, response, ncomp = ncomp, keepX = select.keepX)
+plotIndiv(splsda.final, ind.names = FALSE, legend=TRUE, ellipse = TRUE, title=sprintf("SPLS-DA final result (%s, %s)", st, mlevel))
+plotIndiv(splsda.final, ind.names = FALSE, legend=TRUE, ellipse = TRUE, star = TRUE, title=sprintf("SPLS-DA final result (%s, %s)", st, mlevel))
+background <- background.predict(splsda.final, comp.predicted=2, dist = "max.dist") 
+plotIndiv(splsda.final, comp = 1:2, group = response, ind.names = FALSE, title = sprintf("SPLS-DA (%s, %s)", st, mlevel), legend = TRUE,  background = background)
+perf.final <- perf(splsda.final, validation = "Mfold", folds = 5, dist = 'max.dist', nrepeat = nrepeats, progressBar = FALSE) 
+plot(perf.final)
+# compute mean+SD for performance metrics (using ncomp components as this is model with the selected number of components)
+cmlist <- lapply(1:nrepeats, function(repi) get.confusion_matrix(truth=response, predicted=perf.final$class[["max.dist"]][,repi,ncomp]))
+cmarr <- abind(cmlist, along=3)
+cm.mean <- apply(cmarr, c(1,2), mean); cm.sd <- apply(cmarr, c(1,2), sd)
+accuracy <- 100*apply(cmarr, 3, function(x) sum(diag(x))/sum(x))
+mccvalues <- {}
+for (i in 1:nrepeats) {
+	predicted <- factor(perf.final$class[["max.dist"]][,i,ncomp][names(response)], levels=levels(response))
+	mccvalue <- mcc(as.numeric(predicted)-1, as.numeric(response)-1)
+	mccvalues <- c(mccvalues, mccvalue)
+}
+metrics <- data.frame(accuracy=accuracy, mcc=mccvalues)
+cmtab <- matrix(paste(formatC(cm.mean, format="f", digits=3), formatC(cm.sd, format="f", digits=3), sep=" +/- "), nrow=nrow(cm.mean), dimnames=dimnames(cm.mean))
+p <- qplot(1:10, 1:10, geom = "blank") + theme_bw() + ggtitle(sprintf("confusion matrix mean+/-SD (%s, %s)", st, mlevel)) + theme(line = element_blank()) + annotation_custom(grob = tableGrob(cmtab), xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
+print(p)
+p <- ggplot(metrics, aes(accuracy)) + geom_histogram() + theme_classic() + ggtitle(sprintf("Accuracy (%s, %s) mean=%.4g SD=%.4g", st, mlevel, mean(metrics$accuracy), sd(metrics$accuracy))) + geom_vline(xintercept=mean(metrics$accuracy), col="red")
+print(p)
+p <- ggplot(metrics, aes(mcc)) + geom_histogram() + theme_classic() + ggtitle(sprintf("MCC (%s, %s) mean=%.4g SD=%.4g", st, mlevel, mean(metrics$mcc), sd(metrics$mcc))) + geom_vline(xintercept=mean(metrics$mcc), col="red")
+print(p)
+# arrow plots, loadings, feature stability
+plotArrow(splsda.final, legend=T)
+for (i in 1:ncomp) {
+	plotLoadings(splsda.final, comp = i, title = sprintf("Loadings on comp %d (%s, %s)", i, st, mlevel), contrib = 'max', method = 'mean')
+}
+for (i in 1:ncomp) {
+	inds <- match(selectVar(splsda.final, comp = i)$name, names(perf.final$features$stable[[i]]))
+	freq <- as.numeric(perf.final$features$stable[[i]][inds])
+	df <- data.frame(selectVar(splsda.final, comp = i)$value, freq); df <- df[order(df$freq, decreasing=F),]; df$feature <- factor(rownames(df), levels=rownames(df)) # feature stability
+	p <- ggplot(df, aes(x=feature, y=freq)) + geom_bar(stat="identity") + coord_flip() + theme_classic() + ggtitle(sprintf("Feature stability (%s, %s)", st, mlevel))
+	print(p)
+}
+
+
+
 ###############################################################################################################
 ### METABOLITES (Biopsy subgroup)
 
@@ -1305,6 +1383,659 @@ for (cutoff in c(0.001, 0.002, 0.005)) {
 par(cex.main=1.2)
 
 
+###############################################################################################################
+### multi-omics (everything combined) - 01/14/19
+
+## store data for MOFA
+mlevel <- "BIOCHEMICAL"; level <- "Genus"
+selected <- list()
+for (st in c("fecal", "plasma")) {
+	data <- df.metabolon[[st]][[mlevel]]
+	mapping.sel <- subset(as(sample_data(ps.relative), "data.frame"), StudyID %in% rownames(data))
+	selected[[st]] <- unique(mapping.sel$StudyID)
+}
+mapping.sel <- subset(as(sample_data(ps.relative), "data.frame"))
+selected[["oral16S"]] <- unique(subset(mapping.sel, SampleType2=="OralSwab")$StudyID)
+selected[["rectal16S"]] <- unique(subset(mapping.sel, SampleType2=="OralSwab")$StudyID)
+all_subjects <- Reduce(union, selected)
+
+data.MOFA <- list()
+for (st in c("fecal", "plasma")) {
+	tmp <- df.metabolon[[st]][[mlevel]]
+	colnames(tmp) <- sprintf("[%s] %s", st, colnames(tmp))
+	# pad with NAs
+	rn <- rownames(tmp); adds <- setdiff(all_subjects, rn); pad <- matrix(NA, nrow=length(adds), ncol=ncol(tmp))
+	tmp <- rbind(tmp, pad); rownames(tmp) <- c(rn, adds)
+	data.MOFA[[st]] <- t(tmp)[, all_subjects]
+}
+for (st in c("OralSwab", "RectalSwab")) {
+	ps.sel <- subset_samples(ps.relative, SampleType2==st)
+	otu.filt <- as.data.frame(otu_table(ps.sel))
+  otu.filt[[level]] <- getTaxonomy(otus=rownames(otu.filt), tax_tab=tax_table(ps.sel), level=level)
+  agg <- aggregate(as.formula(sprintf(". ~ %s", level)), otu.filt, sum)
+  lvl <- agg[[level]]
+  agg <- agg[,-1]
+  rownames(agg) <- lvl
+  agg <- agg[which(rowSums(agg > 0.01) >= 3),]
+  agg <- agg[rownames(agg),]
+  colnames(agg) <- unlist(lapply(colnames(agg), function(x) unlist(strsplit(x, "\\."))[1]))
+  rownames(agg) <- sprintf("[%s] %s", st, rownames(agg))
+  # pad with NAs
+	cn <- colnames(agg); adds <- setdiff(all_subjects, cn); pad <- matrix(NA, ncol=length(adds), nrow=nrow(agg))
+	agg <- cbind(agg, pad); colnames(agg) <- c(cn, adds)
+  data.MOFA[[st]] <- agg[, all_subjects]
+}
+tmp <- subset(mapping, SampleType2=="OralSwab"); rownames(tmp) <- gsub("\\.OralSwab", "", rownames(tmp))
+covars <- tmp[all_subjects, colnames(mapping.sel)]
+# save data for MOFA
+save(data.MOFA, covars, file=sprintf("%s/data_for_MOFA.031119.RData", out_dir))
+
+
+## store data for mixOmics using list of subjects that had everything run (fecal metabolites, plasma metabolites, 16S oral, 16S gut)
+mlevel <- "BIOCHEMICAL"; level <- "Genus"
+selected <- list()
+for (st in c("fecal", "plasma")) {
+	data <- df.metabolon[[st]][[mlevel]]
+	mapping.sel <- subset(as(sample_data(ps.relative), "data.frame"), StudyID %in% rownames(data))
+	selected[[st]] <- unique(mapping.sel$StudyID)
+}
+mapping.sel <- subset(as(sample_data(ps.relative), "data.frame"))
+selected[["oral16S"]] <- unique(subset(mapping.sel, SampleType2=="OralSwab")$StudyID)
+selected[["rectal16S"]] <- unique(subset(mapping.sel, SampleType2=="OralSwab")$StudyID)
+selected_subjects <- Reduce(intersect, selected)
+
+data <- {}
+data.mixomics <- list()
+for (st in c("fecal", "plasma")) {
+	tmp <- df.metabolon[[st]][[mlevel]]
+	tmp <- tmp[selected_subjects,]
+	colnames(tmp) <- sprintf("[%s] %s", st, colnames(tmp))
+	data <- cbind(data, tmp)
+	data.mixomics[[st]] <- tmp
+}
+for (st in c("OralSwab", "RectalSwab")) {
+	ps.sel <- subset_samples(ps.relative, SampleType2==st & StudyID %in% selected_subjects)
+	otu.filt <- as.data.frame(otu_table(ps.sel))
+  otu.filt[[level]] <- getTaxonomy(otus=rownames(otu.filt), tax_tab=tax_table(ps.sel), level=level)
+  agg <- aggregate(as.formula(sprintf(". ~ %s", level)), otu.filt, sum)
+  lvl <- agg[[level]]
+  agg <- agg[,-1]
+  rownames(agg) <- lvl
+  agg <- agg[which(rowSums(agg > 0.01) >= 3),]
+  agg <- agg[rownames(agg),]
+  colnames(agg) <- unlist(lapply(colnames(agg), function(x) unlist(strsplit(x, "\\."))[1]))
+  agg <- t(agg[, selected_subjects])
+  colnames(agg) <- sprintf("[%s] %s", st, colnames(agg))
+  data <- cbind(data, agg)
+  data.mixomics[[st]] <- agg
+}
+response <- unlist(sample_data(ps)[match(selected_subjects, sample_data(ps)$StudyID), "Cohort"]); names(response) <- selected_subjects
+# save data for mixOmics
+save(data.mixomics, response, file=sprintf("%s/data_for_mixOmics.011819.RData", out_dir))
+
+# add BMI, Age, Sex as covariates
+data.sel <- as.data.frame(data)
+data.sel$BMI <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "BMI"])
+data.sel$Age <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Age"])
+data.sel$Sex <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Sex"])
+agg.melt.stored <- melt(as.matrix(data.sel[, setdiff(colnames(data.sel), "Sex")]), as.is=T); colnames(agg.melt.stored) <- c("SampleID", "feature", "value")
+
+set.seed(sum(dim(data.sel)))
+
+# random forests classification (multiclass); MULTIOMICS
+## after running for the first time, COMMENT OUT THIS BLOCK ##
+num_iter <- 100
+ncores <- 20
+out <- mclapply(1:num_iter, function (dummy) {
+		importance(randomForest(x=data.sel, y=response, ntree=10000, importance=T), type=1, scale=F)
+	}, mc.cores=ncores )
+collated.importance <- do.call(cbind, out)
+out <- mclapply(1:num_iter, function (dummy) {
+		rfcv(trainx=data.sel, trainy=response, cv.fold=10, step=0.75)$error.cv
+	}, mc.cores=ncores )
+collated.cv <- do.call(cbind, out)
+
+write.table(collated.importance, file=sprintf("%s/randomForest_MULTIOMICS.%s.importance.txt", out_dir, "multiclass"), quote=F, sep="\t", row.names=T, col.names=F)
+write.table(collated.cv, file=sprintf("%s/randomForest_MULTIOMICS.%s.cv.txt", out_dir, "multiclass"), quote=F, sep="\t", row.names=T, col.names=F)
+## END BLOCK TO COMMENT ##
+
+collated.importance <- read.table(sprintf("%s/randomForest_MULTIOMICS.%s.importance.txt", out_dir, "multiclass"), header=F, as.is=T, sep="\t", row.names=1)
+collated.cv <- read.table(sprintf("%s/randomForest_MULTIOMICS.%s.cv.txt", out_dir, "multiclass"), header=F, as.is=T, sep="\t", row.names=1)
+importance.mean <- rowMeans(collated.importance)
+importance.sd <- unlist(apply(collated.importance, 1, sd))
+cv.mean <- rowMeans(collated.cv)
+cv.sd <- unlist(apply(collated.cv, 1, sd))
+inds <- order(importance.mean, decreasing=T)
+write.table(melt(importance.mean[inds]), file=sprintf("%s/randomForest_MULTIOMICS.%s.features.txt", out_dir, "multiclass"), quote=F, sep="\t", row.names=T, col.names=F)
+inds <- inds[1:as.numeric(names(cv.mean)[which.min(cv.mean)])] # cross-validation suggests using 16 features instead of 12 that meet the 0.001 cutoff
+#inds <- inds[1:min(30, length(which(importance.mean[inds] > 0.001)))] # edit as appropriate
+
+# after running for the first time, COMMENT OUT THIS BLOCK ##
+# using a sparse model with N predictors
+sparseRF <- randomForest(x=data.sel[, names(importance.mean[inds])], y=response, ntree=10000, importance=T)
+save(sparseRF, file=sprintf("%s/randomForest_MULTIOMICS.%s.model", out_dir, "multiclass"))
+load(sprintf("%s/randomForest_MULTIOMICS.%s.model", out_dir, "multiclass"))
+# accuracy of final sparseRF model
+pred <- predict(sparseRF, type="prob")
+pred_df <- data.frame(SampleID=rownames(pred), predicted=colnames(pred)[apply(pred, 1, function(x) which.max(x))], true=response[rownames(pred)], stringsAsFactors=F); pred_df$predicted <- factor(pred_df$predicted, levels=levels(pred_df$true))
+pred_df_out <- merge(pred_df, data.sel, by="row.names")
+write.table(pred_df_out, file=sprintf("%s/randomForest_MULTIOMICS.%s.predictions.txt", out_dir, "multiclass"), quote=F, sep="\t", row.names=F, col.names=T)
+confusion_matrix <- table(pred_df[, c("true", "predicted")])
+class_errors <- unlist(lapply(levels(mapping.sel$Cohort), function(x) 1-(confusion_matrix[x,x] / sum(confusion_matrix[x,])) )); names(class_errors) <- levels(mapping.sel$Cohort)
+accuracy <- 100*(sum(diag(confusion_matrix)) / sum(confusion_matrix))
+vec.pred <- as.numeric(pred_df$predicted)-1; vec.true <- as.numeric(pred_df$true)-1
+mccvalue <- mcc(vec.pred, vec.true)
+df <- cbind(confusion_matrix, class_errors[rownames(confusion_matrix)])
+p <- qplot(1:10, 1:10, geom = "blank") + theme_bw() + ggtitle(sprintf("confusion matrix (%s, %s) (accuracy = %.2f%%, MCC = %.4f)", "multiclass", "MULTIOMICS", accuracy, mccvalue)) + theme(line = element_blank()) + annotation_custom(grob = tableGrob(df), xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
+print(p)
+write.table(confusion_matrix, file=sprintf("%s/randomForest_MULTIOMICS.%s.confusion_matrix.txt", out_dir, "multiclass"), quote=F, sep="\t", row.names=T, col.names=T)
+## END BLOCK TO COMMENT ##
+
+# plotting - per-group sparse model
+df <- data.frame(m=cv.mean, sd=cv.sd, numvar=as.numeric(names(cv.mean)))
+colnames(df) <- c("CV_error", "CV_stddev", "num_variables")
+print(ggplot(df, aes(x=num_variables, y=CV_error)) + geom_errorbar(aes(ymin=CV_error-CV_stddev, ymax=CV_error+CV_stddev), width=.1) + geom_line() + geom_point() + ggtitle(sprintf("Model selection - %s %s", "multiclass", "MULTIOMICS")))
+# plotting - per-group variables
+df <- data.frame(OTU=factor(names(importance.mean)[inds], levels=rev(names(importance.mean)[inds])), importance=importance.mean[inds], sd=importance.sd[inds])
+df$metabolite_name <- as.character(df$OTU)
+df$feature_class <- unlist(lapply(df$metabolite_name, function(x) unlist(strsplit(x, " "))[1]))
+p <- ggplot(df, aes(x=OTU, y=importance, label=OTU)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory features", "multiclass", "MULTIOMICS")) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
+print(p) 
+# shading rectangles of importance values
+df.rect <- df
+df.rect$x <- 1; df.rect$y <- 1:nrow(df.rect)
+df.rect$importance <- pmin(df.rect$importance, sort(df.rect$importance, decreasing=T)[2]) # censor importance value to 2nd highest level (drops BMI from coloring)
+p <- ggplot(df.rect, aes(x=x, y=OTU, fill=importance)) + geom_tile() + theme_classic() + ggtitle(sprintf("%s - %s explanatory features", "multiclass", "MULTIOMICS")) + scale_fill_gradient(low="white", high="black") + scale_color_manual(values=cols.sig)
+print(p)
+
+# violin plots of relative abundance
+agg.melt <- agg.melt.stored
+agg.melt$Cohort <- mapping.sel[match(agg.melt$SampleID, mapping.sel$StudyID), "Cohort"]
+agg.melt$Prediction <- ordered(as.character(pred_df[agg.melt$SampleID, "predicted"]), levels=levels(agg.melt$Cohort))
+agg.melt <- subset(agg.melt, feature %in% rownames(df))
+agg.melt$feature <- factor(agg.melt$feature, levels=rownames(df))
+agg.melt$L099 <- ifelse(agg.melt$SampleID=="L099", "L099", "not L099")
+p <- ggplot(agg.melt, aes(x=Cohort, y=value, color=Cohort)) + geom_violin() + geom_point() + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (%s)", "MULTIOMICS")) + coord_flip() + scale_color_manual(values=cols.cohort)
+print(p)
+p <- ggplot(agg.melt, aes(x=Cohort, y=value, color=L099)) + geom_violin() + geom_point(size=1) + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (%s)", "MULTIOMICS")) + coord_flip() + scale_color_manual(values=c("red", "grey"))
+print(p)
+# separate violin plots for each omics type
+for (fc in unique(df$feature_class)) {
+	agg.melt2 <- subset(agg.melt, feature %in% rownames(subset(df, feature_class==fc)))
+	p <- ggplot(agg.melt2, aes(x=feature, y=value, color=Cohort)) + geom_violin(position=position_dodge(width=0.7)) + geom_point(position=position_dodge(width=0.7), size=1) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (%s, %s)", "MULTIOMICS", fc)) + coord_flip() + scale_color_manual(values=cols.cohort)
+	print(p)
+}
+# combined violin plot of all non-BMI features
+agg.melt2 <- subset(agg.melt, feature %in% rownames(subset(df, feature_class!="BMI")))
+p <- ggplot(agg.melt2, aes(x=feature, y=value, color=Cohort)) + geom_violin(position=position_dodge(width=0.7)) + geom_point(position=position_dodge(width=0.7), size=1) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (%s, %s)", "MULTIOMICS", "non-BMI")) + coord_flip() + scale_color_manual(values=cols.cohort)
+print(p)
+# violin plots stratified by prediction/truth
+for (met in levels(agg.melt$feature)) {
+	tmp <- subset(agg.melt, feature==met)
+	p <- ggplot(tmp, aes(x=Cohort, y=value, fill=Prediction)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("Rel. abund. of %s (%s)", met, "MULTIOMICS")) + scale_fill_manual(values=cols.cohort)
+	print(p)	
+	# color scheme - manual
+	p <- ggplot(tmp, aes(x=Cohort, y=value, fill=Prediction)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("Rel. abund. of %s (%s)", met, "MULTIOMICS")) + scale_fill_manual(values=cols.cohort)
+	print(p)
+	p <- ggplot(tmp, aes(x=Cohort, y=value, fill=Prediction, color=Prediction)) + geom_point(position=position_jitter(width=0.1)) + theme_classic() + ggtitle(sprintf("Rel. abund. of %s (%s)", met, "MULTIOMICS")) + scale_color_manual(values=cols.cohort)
+	print(p)
+}
+
+## random forests classification (one-vs-one setup, X vs ObeseNML baseline); MULTIOMICS
+res.mean <- {}; res.sd <- {}; res.sig <- list()
+for (mvar_level in setdiff(levels(mapping.sel[, "Cohort"]), c("NMLBMI", "ObeseNML"))) {
+	sel <- intersect(rownames(data), unique(subset(sample_data(ps), Cohort %in% c(mvar_level, "ObeseNML"))$StudyID))
+	data.sel <- as.data.frame(data[sel,])
+	response <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "Cohort"]); names(response) <- sel
+	# add BMI, Age, Sex as covariates
+	data.sel$BMI <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "BMI"])
+	data.sel$Age <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "Age"])
+	data.sel$Sex <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "Sex"])
+	agg.melt.stored <- melt(as.matrix(data.sel[, setdiff(colnames(data.sel), "Sex")]), as.is=T); colnames(agg.melt.stored) <- c("SampleID", "feature", "value")
+	
+	## after running for the first time, COMMENT OUT THIS BLOCK ##
+	num_iter <- 100
+	ncores <- 20
+	out <- mclapply(1:num_iter, function (dummy) {
+			importance(randomForest(x=data.sel, y=response, ntree=10000, importance=T), type=1, scale=F)
+		}, mc.cores=ncores )
+	collated.importance <- do.call(cbind, out)
+	out <- mclapply(1:num_iter, function (dummy) {
+			rfcv(trainx=data.sel, trainy=response, cv.fold=10, step=0.75)$error.cv
+		}, mc.cores=ncores )
+	collated.cv <- do.call(cbind, out)
+
+	write.table(collated.importance, file=sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.importance.txt", out_dir, mvar_level), quote=F, sep="\t", row.names=T, col.names=F)
+	write.table(collated.cv, file=sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.cv.txt", out_dir, mvar_level), quote=F, sep="\t", row.names=T, col.names=F)
+	## END BLOCK TO COMMENT ##
+
+	collated.importance <- read.table(sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.importance.txt", out_dir, mvar_level), header=F, as.is=T, sep="\t", row.names=1)
+	collated.cv <- read.table(sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.cv.txt", out_dir, mvar_level), header=F, as.is=T, sep="\t", row.names=1)
+	importance.mean <- rowMeans(collated.importance)
+	importance.sd <- unlist(apply(collated.importance, 1, sd))
+	cv.mean <- rowMeans(collated.cv)
+	cv.sd <- unlist(apply(collated.cv, 1, sd))
+	res.mean <- rbind(res.mean, importance.mean)
+	res.sd <- rbind(res.sd, importance.sd)
+	inds <- order(importance.mean, decreasing=T)
+	write.table(melt(importance.mean[inds]), file=sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.features.txt", out_dir, mvar_level), quote=F, sep="\t", row.names=T, col.names=F)
+	inds <- inds[1:min(30, length(which(importance.mean[inds] > 0.001)))] # edit as appropriate
+	res.sig[[length(res.sig)+1]] <- names(importance.mean[inds])
+
+	## after running for the first time, COMMENT OUT THIS BLOCK ##
+	# using a sparse model with N predictors
+	sparseRF <- randomForest(x=data.sel[, names(importance.mean[inds]), drop=F], y=response, ntree=10000, importance=T)
+	save(sparseRF, file=sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.model", out_dir, mvar_level))
+	load(sprintf("%s/randomForest_MULTIOMICS_ObeseNML.%s.model", out_dir, mvar_level))
+	# ROC and AUC of final sparseRF model
+	pred <- predict(sparseRF, type="prob")
+	pred2 <- prediction(pred[,2], ordered(response))
+	perf <- performance(pred2, "tpr", "fpr")
+	perf.auc <- performance(pred2, "auc")
+	pred_df <- data.frame(SampleID=rownames(pred), predicted=colnames(pred)[apply(pred, 1, function(x) which.max(x))], true=response[rownames(pred)], stringsAsFactors=F); pred_df$predicted <- factor(pred_df$predicted, levels=levels(pred_df$true))
+	confusion_matrix <- table(pred_df[, c("true", "predicted")])
+	accuracy <- 100*(sum(diag(confusion_matrix)) / sum(confusion_matrix))
+	vec.pred <- as.numeric(pred_df$predicted)-1; vec.true <- as.numeric(pred_df$true)-1
+	mccvalue <- mcc(vec.pred, vec.true)
+	plot(perf, main=sprintf("ROC %s %s (sparseRF final model ObeseNML baseline)", mvar_level, "MULTIOMICS")) + text(x=0.8, y=0.2, label=sprintf("mean AUC=%.4g, accuracy=%.2f%%, MCC=%.4g", unlist(perf.auc@y.values), accuracy, mccvalue))			
+	## END BLOCK TO COMMENT ##
+	
+	# plotting - per-group sparse model
+	df <- data.frame(m=cv.mean, sd=cv.sd, numvar=as.numeric(names(cv.mean)))
+	colnames(df) <- c("CV_error", "CV_stddev", "num_variables")
+	print(ggplot(df, aes(x=num_variables, y=CV_error)) + geom_errorbar(aes(ymin=CV_error-CV_stddev, ymax=CV_error+CV_stddev), width=.1) + geom_line() + geom_point() + ggtitle(sprintf("Model selection - %s %s", mvar_level, "MULTIOMICS")))
+	# plotting - per-group variables
+	df <- data.frame(OTU=factor(names(importance.mean)[inds], levels=rev(names(importance.mean)[inds])), importance=importance.mean[inds], sd=importance.sd[inds])
+	df$metabolite_name <- as.character(df$OTU)
+	df$feature_class <- unlist(lapply(df$metabolite_name, function(x) unlist(strsplit(x, " "))[1]))
+	p <- ggplot(df, aes(x=OTU, y=importance, label=OTU)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory features", mvar_level, "MULTIOMICS")) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
+	print(p) 
+	# shading rectangles of importance values
+	df.rect <- df
+	df.rect$x <- 1; df.rect$y <- 1:nrow(df.rect)
+	df.rect$importance <- pmin(df.rect$importance, sort(df.rect$importance, decreasing=T)[2]) # censor importance value to 2nd highest level (drops BMI from coloring)
+	p <- ggplot(df.rect, aes(x=x, y=OTU, fill=importance)) + geom_tile() + theme_classic() + ggtitle(sprintf("%s - %s explanatory features", mvar_level, "MULTIOMICS")) + scale_fill_gradient(low="white", high="black") + scale_color_manual(values=cols.sig)
+	print(p)
+	# violin plots of relative abundance
+	agg.melt <- agg.melt.stored
+	agg.melt$Cohort <- mapping.sel[match(agg.melt$SampleID, mapping.sel$StudyID), "Cohort"]
+	agg.melt$Prediction <- ordered(as.character(pred_df[agg.melt$SampleID, "predicted"]), levels=levels(agg.melt$Cohort))
+	agg.melt <- subset(agg.melt, feature %in% rownames(df))
+	agg.melt$feature <- factor(agg.melt$feature, levels=rownames(df))
+	agg.melt$L099 <- ifelse(agg.melt$SampleID=="L099", "L099", "not L099")
+	p <- ggplot(agg.melt, aes(x=Cohort, y=value, color=Cohort)) + geom_violin() + geom_point() + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (ObeseNML %s, %s)", "MULTIOMICS", mvar_level)) + coord_flip() + scale_color_manual(values=cols.cohort)
+	print(p)
+	p <- ggplot(agg.melt, aes(x=Cohort, y=value, color=L099)) + geom_violin() + geom_point(size=1) + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (ObeseNML %s, %s)", "MULTIOMICS", mvar_level)) + coord_flip() + scale_color_manual(values=c("red", "grey"))
+	print(p)
+	# separate violin plots for each omics type
+	for (fc in unique(df$feature_class)) {
+		agg.melt2 <- subset(agg.melt, feature %in% rownames(subset(df, feature_class==fc)))
+		p <- ggplot(agg.melt2, aes(x=feature, y=value, color=Cohort)) + geom_violin(position=position_dodge(width=0.7)) + geom_point(position=position_dodge(width=0.7), size=1) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (ObeseNML %s, %s, %s)", "MULTIOMICS", fc, mvar_level)) + coord_flip() + scale_color_manual(values=cols.cohort)
+		print(p)
+	}
+	# combined violin plot of all non-BMI features
+	agg.melt2 <- subset(agg.melt, feature %in% rownames(subset(df, feature_class!="BMI")))
+	p <- ggplot(agg.melt2, aes(x=feature, y=value, color=Cohort)) + geom_violin(position=position_dodge(width=0.7)) + geom_point(position=position_dodge(width=0.7), size=1) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (ObeseNML %s, %s, %s)", "MULTIOMICS", "non-BMI", mvar_level)) + coord_flip() + scale_color_manual(values=cols.cohort)
+	print(p)
+}
+# plotting - all groups importance values
+rownames(res.mean) <- setdiff(levels(mapping.sel[, "Cohort"]), c("NMLBMI", "ObeseNML")); rownames(res.sd) <- rownames(res.mean)
+df <- res.mean[, unique(unlist(res.sig))]; df[which(df<0.001, arr.ind=T)] <- 0
+df.sig <- matrix("", nrow=nrow(df), ncol=ncol(df)); rownames(df.sig) <- rownames(df); colnames(df.sig) <- colnames(df)
+for (i in 1:length(res.sig)) {
+	df.sig[i, res.sig[[i]]] <- "*"
+}
+heatmap.2(df, Rowv=T, Colv=T, dendrogram="both", trace="none", col=colorRampPalette(c("white","blue"))(150), margins=c(10,10), cexCol=0.6, cexRow=0.6, cellnote=df.sig, notecex=0.8, notecol="red", main=sprintf("RF importance values (%s, %s)", "ObeseNML", "MULTIOMICS"))
+
+
+## random forests classification (NASH vs NAFLD); MULTIOMICS
+mvar_level <- "NASH"
+sel <- intersect(rownames(data), unique(subset(sample_data(ps), Cohort %in% c(mvar_level, "NAFLD"))$StudyID))
+data.sel <- as.data.frame(data[sel,])
+response <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "Cohort"]); names(response) <- sel
+# add BMI, Age, Sex as covariates
+data.sel$BMI <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "BMI"])
+data.sel$Age <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "Age"])
+data.sel$Sex <- unlist(sample_data(ps)[match(sel, sample_data(ps)$StudyID), "Sex"])
+agg.melt.stored <- melt(as.matrix(data.sel[, setdiff(colnames(data.sel), "Sex")]), as.is=T); colnames(agg.melt.stored) <- c("SampleID", "feature", "value")
+
+## after running for the first time, COMMENT OUT THIS BLOCK ##
+num_iter <- 100
+ncores <- 20
+out <- mclapply(1:num_iter, function (dummy) {
+		importance(randomForest(x=data.sel, y=response, ntree=10000, importance=T), type=1, scale=F)
+	}, mc.cores=ncores )
+collated.importance <- do.call(cbind, out)
+out <- mclapply(1:num_iter, function (dummy) {
+		rfcv(trainx=data.sel, trainy=response, cv.fold=10, step=0.75)$error.cv
+	}, mc.cores=ncores )
+collated.cv <- do.call(cbind, out)
+
+write.table(collated.importance, file=sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.importance.txt", out_dir, mvar_level), quote=F, sep="\t", row.names=T, col.names=F)
+write.table(collated.cv, file=sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.cv.txt", out_dir, mvar_level), quote=F, sep="\t", row.names=T, col.names=F)
+## END BLOCK TO COMMENT ##
+
+collated.importance <- read.table(sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.importance.txt", out_dir, mvar_level), header=F, as.is=T, sep="\t", row.names=1)
+collated.cv <- read.table(sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.cv.txt", out_dir, mvar_level), header=F, as.is=T, sep="\t", row.names=1)
+importance.mean <- rowMeans(collated.importance)
+importance.sd <- unlist(apply(collated.importance, 1, sd))
+cv.mean <- rowMeans(collated.cv)
+cv.sd <- unlist(apply(collated.cv, 1, sd))
+res.mean <- rbind(res.mean, importance.mean)
+res.sd <- rbind(res.sd, importance.sd)
+inds <- order(importance.mean, decreasing=T)
+write.table(melt(importance.mean[inds]), file=sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.features.txt", out_dir, mvar_level), quote=F, sep="\t", row.names=T, col.names=F)
+inds <- inds[1:min(30, length(which(importance.mean[inds] > 0.001)))] # edit as appropriate
+
+## after running for the first time, COMMENT OUT THIS BLOCK ##
+# using a sparse model with N predictors
+sparseRF <- randomForest(x=data.sel[, names(importance.mean[inds]), drop=F], y=response, ntree=10000, importance=T)
+save(sparseRF, file=sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.model", out_dir, mvar_level))
+load(sprintf("%s/randomForest_MULTIOMICS_NAFLD.%s.model", out_dir, mvar_level))
+# ROC and AUC of final sparseRF model
+pred <- predict(sparseRF, type="prob")
+pred2 <- prediction(pred[,2], ordered(response))
+perf <- performance(pred2, "tpr", "fpr")
+perf.auc <- performance(pred2, "auc")
+pred_df <- data.frame(SampleID=rownames(pred), predicted=colnames(pred)[apply(pred, 1, function(x) which.max(x))], true=response[rownames(pred)], stringsAsFactors=F); pred_df$predicted <- factor(pred_df$predicted, levels=levels(pred_df$true))
+confusion_matrix <- table(pred_df[, c("true", "predicted")])
+accuracy <- 100*(sum(diag(confusion_matrix)) / sum(confusion_matrix))
+vec.pred <- as.numeric(pred_df$predicted)-1; vec.true <- as.numeric(pred_df$true)-1
+mccvalue <- mcc(vec.pred, vec.true)
+plot(perf, main=sprintf("ROC %s %s (sparseRF final model NAFLD baseline)", mvar_level, "MULTIOMICS")) + text(x=0.8, y=0.2, label=sprintf("mean AUC=%.4g, accuracy=%.2f%%, MCC=%.4g", unlist(perf.auc@y.values), accuracy, mccvalue))			
+## END BLOCK TO COMMENT ##
+
+# plotting - per-group sparse model
+df <- data.frame(m=cv.mean, sd=cv.sd, numvar=as.numeric(names(cv.mean)))
+colnames(df) <- c("CV_error", "CV_stddev", "num_variables")
+print(ggplot(df, aes(x=num_variables, y=CV_error)) + geom_errorbar(aes(ymin=CV_error-CV_stddev, ymax=CV_error+CV_stddev), width=.1) + geom_line() + geom_point() + ggtitle(sprintf("Model selection - %s %s", mvar_level, "MULTIOMICS")))
+# plotting - per-group variables
+df <- data.frame(OTU=factor(names(importance.mean)[inds], levels=rev(names(importance.mean)[inds])), importance=importance.mean[inds], sd=importance.sd[inds])
+df$metabolite_name <- as.character(df$OTU)
+df$feature_class <- unlist(lapply(df$metabolite_name, function(x) unlist(strsplit(x, " "))[1]))
+p <- ggplot(df, aes(x=OTU, y=importance, label=OTU)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory features", mvar_level, "MULTIOMICS")) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
+print(p) 
+# shading rectangles of importance values
+df.rect <- df
+df.rect$x <- 1; df.rect$y <- 1:nrow(df.rect)
+df.rect$importance <- pmin(df.rect$importance, sort(df.rect$importance, decreasing=T)[2]) # censor importance value to 2nd highest level (drops BMI from coloring)
+p <- ggplot(df.rect, aes(x=x, y=OTU, fill=importance)) + geom_tile() + theme_classic() + ggtitle(sprintf("%s - %s explanatory features", mvar_level, "MULTIOMICS")) + scale_fill_gradient(low="white", high="black") + scale_color_manual(values=cols.sig)
+print(p)
+# violin plots of relative abundance
+agg.melt <- agg.melt.stored
+agg.melt$Cohort <- mapping.sel[match(agg.melt$SampleID, mapping.sel$StudyID), "Cohort"]
+agg.melt$Prediction <- ordered(as.character(pred_df[agg.melt$SampleID, "predicted"]), levels=levels(agg.melt$Cohort))
+agg.melt <- subset(agg.melt, feature %in% rownames(df))
+agg.melt$feature <- factor(agg.melt$feature, levels=rownames(df))
+agg.melt$L099 <- ifelse(agg.melt$SampleID=="L099", "L099", "not L099")
+p <- ggplot(agg.melt, aes(x=Cohort, y=value, color=Cohort)) + geom_violin() + geom_point() + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (NAFLD %s, %s)", "MULTIOMICS", mvar_level)) + coord_flip() + scale_color_manual(values=cols.cohort)
+print(p)
+p <- ggplot(agg.melt, aes(x=Cohort, y=value, color=L099)) + geom_violin() + geom_point(size=1) + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (NAFLD %s, %s)", "MULTIOMICS", mvar_level)) + coord_flip() + scale_color_manual(values=c("red", "grey"))
+print(p)
+# separate violin plots for each omics type
+for (fc in unique(df$feature_class)) {
+	agg.melt2 <- subset(agg.melt, feature %in% rownames(subset(df, feature_class==fc)))
+	p <- ggplot(agg.melt2, aes(x=feature, y=value, color=Cohort)) + geom_violin(position=position_dodge(width=0.7)) + geom_point(position=position_dodge(width=0.7), size=1) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (NAFLD %s, %s, %s)", "MULTIOMICS", fc, mvar_level)) + coord_flip() + scale_color_manual(values=cols.cohort)
+	print(p)
+}
+# combined violin plot of all non-BMI features
+agg.melt2 <- subset(agg.melt, feature %in% rownames(subset(df, feature_class!="BMI")))
+p <- ggplot(agg.melt2, aes(x=feature, y=value, color=Cohort)) + geom_violin(position=position_dodge(width=0.7)) + geom_point(position=position_dodge(width=0.7), size=1) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF features (NAFLD %s, %s, %s)", "MULTIOMICS", "non-BMI", mvar_level)) + coord_flip() + scale_color_manual(values=cols.cohort)
+print(p)
+
+
+
+
+## random forests classification (biopsy data); MULTIOMICS
+# get selected data
+biopsy <- read.table(sprintf("%s/liver_biopsy.txt", data_dir), header=T, row.names=1, as.is=T, sep="\t")
+colnames(biopsy) <- c("NAS_score", "Diagnosis", "Steatosis", "LobularInflammation", "PortalInflammation", "Ballooning", "Fibrosis", "Cirrhosis", "Metabolon")
+biopsy$Diagnosis2 <- factor(ifelse(biopsy$NAS_score >= 5, "DefiniteNASH", "BorderlineNASH"))
+biopsy$Fibrosis2 <- factor(ifelse(biopsy$Fibrosis >= 3, "Advanced", "Mild"), levels=c("Mild", "Advanced"))
+biopsy$Steatosis2 <- factor(pmax(biopsy$Steatosis, 1)) # convert 0 -> 1
+biopsy$LobularInflammation2 <- factor(pmax(biopsy$LobularInflammation, 1)) # convert 0 -> 1
+biopsy$Ballooning2 <- factor(biopsy$Ballooning)
+biopsy_variables <- c("Diagnosis2", "Steatosis2", "Fibrosis2", "LobularInflammation2", "Ballooning2")
+sel <- intersect(rownames(biopsy), rownames(data))
+biopsy <- biopsy[sel,]
+data.sel <- as.data.frame(data[sel,])
+
+# classification
+set.seed(nrow(biopsy))
+for (biopsy_variable in biopsy_variables) {
+	response <- biopsy[sel, biopsy_variable]; names(response) <- sel
+	# add BMI, Age, Sex as covariates
+	data.sel$BMI <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "BMI"])
+	data.sel$Age <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Age"])
+	data.sel$Sex <- unlist(sample_data(ps)[match(rownames(data.sel), sample_data(ps)$StudyID), "Sex"])
+	agg.melt.stored <- melt(as.matrix(data.sel[, setdiff(colnames(data.sel), "Sex")]), as.is=T); colnames(agg.melt.stored) <- c("SampleID", "feature", "value")
+
+	## after running for the first time, COMMENT OUT THIS BLOCK ##
+	num_iter <- 100
+	ncores <- 20
+	out <- mclapply(1:num_iter, function (dummy) {
+			importance(randomForest(x=data.sel, y=response, ntree=10000, importance=T), type=1, scale=F)
+		}, mc.cores=ncores )
+	collated.importance <- do.call(cbind, out)
+	out <- mclapply(1:num_iter, function (dummy) {
+			rfcv(trainx=data.sel, trainy=response, cv.fold=10, step=0.75)$error.cv
+		}, mc.cores=ncores )
+	collated.cv <- do.call(cbind, out)
+
+	write.table(collated.importance, file=sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.importance.txt", out_dir, biopsy_variable), quote=F, sep="\t", row.names=T, col.names=F)
+	write.table(collated.cv, file=sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.cv.txt", out_dir, biopsy_variable), quote=F, sep="\t", row.names=T, col.names=F)
+	## END BLOCK TO COMMENT ##
+
+	collated.importance <- read.table(sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.importance.txt", out_dir, biopsy_variable), header=F, as.is=T, sep="\t", row.names=1)
+	collated.cv <- read.table(sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.cv.txt", out_dir, biopsy_variable), header=F, as.is=T, sep="\t", row.names=1)
+	importance.mean <- rowMeans(collated.importance)
+	importance.sd <- unlist(apply(collated.importance, 1, sd))
+	cv.mean <- rowMeans(collated.cv)
+	cv.sd <- unlist(apply(collated.cv, 1, sd))
+	inds <- order(importance.mean, decreasing=T)
+	write.table(melt(importance.mean[inds]), file=sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.features.txt", out_dir, biopsy_variable), quote=F, sep="\t", row.names=T, col.names=F)
+	inds <- inds[1:min(30, length(which(importance.mean[inds] > 0.001)))] # edit as appropriate
+	
+
+	## after running for the first time, COMMENT OUT THIS BLOCK ##
+	# using a sparse model with N predictors
+	sparseRF <- randomForest(x=data.sel[, names(importance.mean[inds]), drop=F], y=response, ntree=10000, importance=T)
+	save(sparseRF, file=sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.model", out_dir, biopsy_variable))
+	load(sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.model", out_dir, biopsy_variable))
+	# accuracy of final sparseRF model
+	pred <- predict(sparseRF, type="prob")
+	pred_df <- data.frame(SampleID=rownames(pred), predicted=colnames(pred)[apply(pred, 1, function(x) which.max(x))], true=response[rownames(pred)], stringsAsFactors=F); pred_df$predicted <- factor(pred_df$predicted, levels=levels(pred_df$true))
+	pred_df_out <- merge(pred_df, data.sel, by="row.names")
+	write.table(pred_df_out, file=sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.predictions.txt", out_dir, biopsy_variable), quote=F, sep="\t", row.names=F, col.names=T)
+	confusion_matrix <- table(pred_df[, c("true", "predicted")])
+	class_errors <- unlist(lapply(levels(biopsy[,biopsy_variable]), function(x) 1-(confusion_matrix[x,x] / sum(confusion_matrix[x,])) )); names(class_errors) <- levels(biopsy[,biopsy_variable])
+	accuracy <- 100*(sum(diag(confusion_matrix)) / sum(confusion_matrix))
+	vec.pred <- as.numeric(pred_df$predicted)-1; vec.true <- as.numeric(pred_df$true)-1
+	mccvalue <- mcc(vec.pred, vec.true)
+	df <- cbind(confusion_matrix, class_errors[rownames(confusion_matrix)])
+	p <- qplot(1:10, 1:10, geom = "blank") + theme_bw() + ggtitle(sprintf("confusion matrix (%s, %s) (accuracy = %.2f%%, MCC = %.4f)", biopsy_variable, "MULTIOMICS", accuracy, mccvalue)) + theme(line = element_blank()) + annotation_custom(grob = tableGrob(df), xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
+	print(p)
+	write.table(confusion_matrix, file=sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.confusion_matrix.txt", out_dir, biopsy_variable), quote=F, sep="\t", row.names=T, col.names=T)
+	# ROC analysis
+	if (nlevels(response)==2) {
+		pred <- predict(sparseRF, type="prob")
+		pred2 <- prediction(pred[,2], ordered(response))
+		perf <- performance(pred2, "tpr", "fpr")
+		perf.auc <- performance(pred2, "auc")
+		print(plot(perf, main=sprintf("ROC %s %s (sparseRF final model)", biopsy_variable, "MULTIOMICS")) + text(x=0.8, y=0.2, label=sprintf("mean AUC=%.4g", unlist(perf.auc@y.values))))
+	}
+	## END BLOCK TO COMMENT ##
+
+	# plotting - per-group sparse model
+	df <- data.frame(m=cv.mean, sd=cv.sd, numvar=as.numeric(names(cv.mean)))
+	colnames(df) <- c("CV_error", "CV_stddev", "num_variables")
+	print(ggplot(df, aes(x=num_variables, y=CV_error)) + geom_errorbar(aes(ymin=CV_error-CV_stddev, ymax=CV_error+CV_stddev), width=.1) + geom_line() + geom_point() + ggtitle(sprintf("Model selection - %s %s", biopsy_variable, "MULTIOMICS")))
+	# plotting - per-group variables
+	df <- data.frame(OTU=factor(names(importance.mean)[inds], levels=rev(names(importance.mean)[inds])), importance=importance.mean[inds], sd=importance.sd[inds])
+	df$metabolite_name <- as.character(df$OTU)
+	df$feature_class <- unlist(lapply(df$metabolite_name, function(x) unlist(strsplit(x, " "))[1]))
+	p <- ggplot(df, aes(x=OTU, y=importance, label=OTU)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory features", biopsy_variable, "MULTIOMICS")) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
+	print(p) 
+	# shading rectangles of importance values
+	df.rect <- df
+	df.rect$x <- 1; df.rect$y <- 1:nrow(df.rect)
+	df.rect$importance <- pmin(df.rect$importance, sort(df.rect$importance, decreasing=T)[2]) # censor importance value to 2nd highest level (drops BMI from coloring)
+	p <- ggplot(df.rect, aes(x=x, y=OTU, fill=importance)) + geom_tile() + theme_classic() + ggtitle(sprintf("%s - %s explanatory features", biopsy_variable, "MULTIOMICS")) + scale_fill_gradient(low="white", high="black") + scale_color_manual(values=cols.sig)
+	print(p)
+	# violin plots of relative abundance
+	agg.melt <- agg.melt.stored
+	agg.melt$Truth <- biopsy[agg.melt$SampleID, biopsy_variable]
+	agg.melt$Prediction <- ordered(as.character(pred_df[agg.melt$SampleID, "predicted"]), levels=levels(agg.melt$Truth))
+	agg.melt <- subset(agg.melt, feature %in% rownames(df))
+	agg.melt$feature <- factor(agg.melt$feature, levels=rownames(df))
+	p <- ggplot(agg.melt, aes(x=Truth, y=value, color=Truth)) + geom_violin() + geom_point() + facet_wrap(~feature, scales="free", ncol=3) + theme_classic() + ggtitle(sprintf("Rel. abund. of RF metabolites (%s, %s)", biopsy_variable, "MULTIOMICS")) + coord_flip()
+	print(p)
+	# violin plots stratified by prediction/truth
+	for (met in levels(agg.melt$feature)) {
+		tmp <- subset(agg.melt, feature==met)
+		# color scheme - Set1
+		p <- ggplot(tmp, aes(x=Truth, y=value, fill=Prediction)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("Rel. abund. of %s (%s)", met, "MULTIOMICS")) + scale_fill_brewer(palette="Set1")
+		print(p)
+		p <- ggplot(tmp, aes(x=Truth, y=value, fill=Prediction, color=Prediction)) + geom_point(position=position_jitter(width=0.1)) + theme_classic() + ggtitle(sprintf("Rel. abund. of %s (%s)", met, "MULTIOMICS")) + scale_color_brewer(palette="Set1")
+		print(p)
+	}
+}
+
+
+# heatmap of all biopsy classification models
+for (cutoff in c(0.001, 0.002, 0.005)) {
+	res <- {}
+	for (biopsy_variable in biopsy_variables) {
+		collated.importance <- read.table(sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.importance.txt", out_dir, biopsy_variable), header=F, as.is=T, sep="\t", row.names=1)
+		collated.cv <- read.table(sprintf("%s/randomForest_BIOPSY_MULTIOMICS.%s.cv.txt", out_dir, biopsy_variable), header=F, as.is=T, sep="\t", row.names=1)
+		importance.mean <- rowMeans(collated.importance)
+		importance.sd <- unlist(apply(collated.importance, 1, sd))
+		cv.mean <- rowMeans(collated.cv)
+		cv.sd <- unlist(apply(collated.cv, 1, sd))
+		inds <- order(importance.mean, decreasing=T)
+		inds <- inds[1:min(30, length(which(importance.mean[inds] > cutoff)))]
+		tmp <- data.frame(feature=names(importance.mean[inds]), importance=importance.mean[inds], mvar=biopsy_variable)
+		res <- rbind(res, tmp)
+	}
+	df <- dcast(res, feature ~ mvar, value.var="importance")
+	rownames(df) <- df$feature; df <- as.matrix(df[,-1])
+#			df <- log2(df)
+	df[which(is.na(df), arr.ind=T)] <- 0 # NA -> 0
+	par(cex.main=0.5)
+	print(heatmap.2(df, Rowv=T, Colv=F, dendrogram="none", trace="none", col=colorRampPalette(c("white","blue"))(150), margins=c(10,15), cexCol=0.6, cexRow=0.4, main=sprintf("Biopsy RF (%s, imp cutoff=%.3g)", "MULTIOMICS", cutoff)))
+	print(heatmap.2(df, Rowv=T, Colv=F, dendrogram="row", trace="none", col=colorRampPalette(c("white","blue"))(150), margins=c(10,15), cexCol=0.6, cexRow=0.4, main=sprintf("Biopsy RF (%s, imp cutoff=%.3g)", "MULTIOMICS", cutoff)))
+}
+par(cex.main=1.2)
+
+
+
+## mixOmics
+# load data (in new R 3.5.2 environment because all other analysis is in R 3.4.3 but mixOmics is not available in older R)
+library(mixOmics)
+cols.cohort <- c("#888888", "orange", "red", "#a400a4"); names(cols.cohort) <- c("NMLBMI", "ObeseNML", "NAFLD", "NASH")
+load(sprintf("%s/data_for_mixOmics.011819.RData", out_dir))
+data <- data.mixomics
+set.seed(length(data))
+
+# set up design matrix
+design <- matrix(0.1, ncol = length(data), nrow = length(data), dimnames = list(names(data), names(data)))
+diag(design) <- 0
+
+# tune the number of components
+sgccda.res <- block.splsda(X = data, Y = response, ncomp = 5, design = design)
+perf.diablo <- perf(sgccda.res, validation = 'Mfold', folds = 10, nrepeat = 10)
+plot(perf.diablo)
+ncomp <- perf.diablo$choice.ncomp$WeightedPredict["Overall.BER", ]
+
+# tune keepX (number of parameters to keep from each data type)
+test.keepX <- list(fecal = c(5:9, seq(10, 18, 2), seq(20,30,5)), plasma = c(5:9, seq(10, 18, 2), seq(20,30,5)), OralSwab = c(5:9, seq(10, 18, 2), seq(20,30,5)), RectalSwab = c(5:9, seq(10, 18, 2), seq(20,30,5)))
+tune <- tune.block.splsda(X = data, Y = response, ncomp = ncomp, test.keepX = test.keepX, design = design, validation = 'Mfold', folds = 10, nrepeat = 1, cpus = 16, dist = "mahalanobis.dist")
+
+# final model
+sgccda.res <- block.splsda(X = data, Y = response, ncomp = ncomp, keepX = tune$choice.keepX, design = design)
+
+# diagnostic plots
+plotDiablo(sgccda.res, ncomp = 1)
+plotIndiv(sgccda.res, ind.names = FALSE, legend = TRUE, title = 'DIABLO')
+plotIndiv(sgccda.res, ind.names = FALSE, legend = TRUE, title = 'DIABLO', ellipse=TRUE)
+plotArrow(sgccda.res, ind.names = FALSE, legend = TRUE, title = 'DIABLO')
+
+plotVar(sgccda.res, var.names = FALSE, style = 'graphics', legend = TRUE)
+circosPlot(sgccda.res, cutoff = 0.7, line = TRUE, size.labels = 1.5, comp=1, color.Y=cols.cohort)
+circosPlot(sgccda.res, cutoff = 0.8, line = TRUE, size.labels = 1.5, comp=1)
+circosPlot(sgccda.res, cutoff = 0.7, line = TRUE, size.labels = 1.5, comp=2)
+circosPlot(sgccda.res, cutoff = 0.8, line = TRUE, size.labels = 1.5, comp=2)
+
+plotLoadings(sgccda.res, comp = 1, contrib = 'max', method = 'median')
+plotLoadings(sgccda.res, comp = 2, contrib = 'max', method = 'median')
+cimDiablo(sgccda.res, comp=1, margins=c(4,20), size.legend=0.8, transpose=T, legend.position="topright", color.Y=cols.cohort)
+cimDiablo(sgccda.res, comp=2, margins=c(4,20), size.legend=0.8, transpose=T, legend.position="topright", color.Y=cols.cohort)
+
+for (b in rownames(design)) {
+	auc.splsda <- auroc(sgccda.res, roc.block = b, roc.comp = 1)
+	auc.splsda <- auroc(sgccda.res, roc.block = b, roc.comp = 2)
+}
+
+
+## MOFA (https://github.com/bioFAM/MOFA)
+library(MOFA)
+library(MultiAssayExperiment)
+
+# load data
+cols.cohort <- c("#888888", "orange", "red", "#a400a4"); names(cols.cohort) <- c("NMLBMI", "ObeseNML", "NAFLD", "NASH")
+load(sprintf("%s/data_for_MOFA.031119.RData", out_dir))
+
+# set up MOFA object
+mae <- MultiAssayExperiment(experiments = data.MOFA, colData = covars)
+MOFAobject <- createMOFAobject(mae)
+MOFAobject
+DataOptions <- getDefaultDataOptions()
+ModelOptions <- getDefaultModelOptions(MOFAobject)
+ModelOptions$numFactors <- 25
+TrainOptions <- getDefaultTrainOptions()
+TrainOptions$maxiter <- 15000
+TrainOptions$DropFactorThreshold <- 0.02
+TrainOptions$tolerance <- 0.1
+TrainOptions$seed <- length(data.MOFA)
+MOFAobject <- prepareMOFA(MOFAobject, DataOptions=DataOptions, ModelOptions=ModelOptions, TrainOptions=TrainOptions)
+# save featureNames to fix truncation during HDF5 save
+featurenames <- MOFA::featureNames(MOFAobject)
+
+# train MOFA model
+#MOFAobject <- runMOFA(MOFAobject, outfile=sprintf("%s/MOFAobject.hdf5", out_dir))
+MOFAobject <- loadModel(sprintf("%s/MOFAobject.hdf5", out_dir), MOFAobject)
+MOFA::featureNames(MOFAobject) <- featurenames[names(MOFA::featureNames(MOFAobject))]
+
+# secondary anaylsis
+r2 <- calculateVarianceExplained(MOFAobject)
+plotVarianceExplained(MOFAobject)
+for (viewname in viewNames(MOFAobject)) {
+	plotWeightsHeatmap(MOFAobject, view=viewname, factors="all", show_colnames=T, main=sprintf("%s", viewname), fontsize_row=8, fontsize_col=4)
+}
+for (viewname in viewNames(MOFAobject)) {
+	for (lf in factorNames(MOFAobject)) {
+		print(plotWeights(MOFAobject, view=viewname, factor=lf, nfeatures=10) + ggtitle(sprintf("%s (%s)", viewname, lf)) + theme(text=element_text(size=6)))
+	}
+}
+for (viewname in viewNames(MOFAobject)) {
+	for (lf in factorNames(MOFAobject)) {
+		print(plotTopWeights(MOFAobject, view=viewname, factor=lf))
+	}
+}
+for (viewname in viewNames(MOFAobject)) {
+	for (lf in factorNames(MOFAobject)) {
+		plotDataHeatmap(MOFAobject, view=viewname, factor=lf, features=20, show_rownames=T, main=sprintf("%s (%s)", viewname, lf), fontsize_row=4, fontsize_col=6)
+	}
+}
+plotFactorScatter(MOFAobject, factors=1:2, color_by="Cohort")
+plotFactorScatters(MOFAobject, factors=1:3, color_by="Cohort")
+
+
+plotFactorBeeswarm(MOFAobject, factor=1, color_by="Cohort")
+clusters <- clusterSamples(MOFAobject, k=2, factors=1)
+
+
+
 ##########################################################################################################################
 ### Shotgun analysis
 library(phyloseq)
@@ -1320,7 +2051,7 @@ data <- data[, setdiff(1:ncol(data), grep(".Bacterial.kraken.1", colnames(data))
 colnames(data) <- gsub("PCMP_", "", gsub(".Bacterial.kraken", "", colnames(data)))
 rownames(data) <- gsub("\\|", ";", rownames(data))
 
-mapping <- read.table(sprintf("%s/Kathy_NAFLD_Mapping.combined.txt", data_dir), header=T, as.is=T, sep="\t", comment.char="", row.names=1)
+mapping <- read.table(sprintf("%s/NAFLDomics_Mapping.combined.txt", data_dir), header=T, as.is=T, sep="\t", comment.char="", row.names=1)
 metadata <- read.delim(sprintf("%s/metadata.052218.txt", data_dir), header=T, sep="\t", comment.char=""); colnames(metadata)[1] <- "StudyID"
 # impute missing BMI values
 metadata$BMI....kg.m.2. <- as.numeric(as.character(metadata$BMI....kg.m.2.))
@@ -1387,7 +2118,7 @@ for (distance_metric in distance_metrics) {
   p <- plot_ordination(ps.sel, ordi, "samples", color = "BMI") + geom_point(size = 2) + theme_classic() + ggtitle(sprintf("%s - %s", "BMI", distance_metric))
   print(p)
 }
-sink(sprintf("%s/phyloseq_output.%s.%s.txt", out_dir, "Kathy_NAFLD_Shotgun", format(Sys.Date(), "%m%d%y")))
+sink(sprintf("%s/phyloseq_output.%s.%s.txt", out_dir, "NAFLDomics_Shotgun", format(Sys.Date(), "%m%d%y")))
 dm <- list()
 for (distance_metric in distance_metrics) {
   dm[[length(dm)+1]] <- as.matrix(phyloseq::distance(ps.sel, method=distance_metric))
@@ -1442,7 +2173,7 @@ for (am in alpha_metrics){
   p <- ggplot(adiv, aes_string(x="SampleID", y=am)) + geom_bar(stat="identity", position="identity") + theme_classic() + ggtitle(sprintf("Alpha Diversity (%s)", am)) + theme( axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=8))
   print(p)
   test <- wilcox.test(as.formula(sprintf("%s ~ Cohort", am)), adiv)
-  sink(sprintf("%s/phyloseq_output.%s.%s.txt", out_dir, "Kathy_NAFLD_Shotgun", format(Sys.Date(), "%m%d%y")), append=T)
+  sink(sprintf("%s/phyloseq_output.%s.%s.txt", out_dir, "NAFLDomics_Shotgun", format(Sys.Date(), "%m%d%y")), append=T)
   mod <- lm(as.formula(sprintf("%s ~ Cohort + BMI + Age + Sex", am)), adiv)
   print(summary(mod))
   sink()
@@ -1468,7 +2199,7 @@ df$BMI <- mapping.sel[as.character(df$SampleID), "BMI"]
 df$Age <- mapping.sel[as.character(df$SampleID), "Age"]
 df$Sex <- mapping.sel[as.character(df$SampleID), "Sex"]
 test <- wilcox.test(BFLogRatio ~ Cohort, df)
-sink(sprintf("%s/phyloseq_output.%s.%s.txt", out_dir, "Kathy_NAFLD_Shotgun", format(Sys.Date(), "%m%d%y")), append=T)
+sink(sprintf("%s/phyloseq_output.%s.%s.txt", out_dir, "NAFLDomics_Shotgun", format(Sys.Date(), "%m%d%y")), append=T)
 mod <- lm(as.formula(sprintf("%s ~ Cohort + BMI + Age + Sex", "BFLogRatio")), df)
 summary(mod)
 sink()
@@ -1600,7 +2331,7 @@ data <- read.table(sprintf("%s/merged_pathabundance.txt", data_dir), header=T, a
 colnames(data) <- gsub("PCMP_", "", gsub(".cat.filtered2_Abundance", "", colnames(data)))
 rownames(data) <- gsub("\\|", ";", rownames(data))
 
-mapping <- read.table(sprintf("%s/Kathy_NAFLD_Mapping.combined.txt", data_dir), header=T, as.is=T, sep="\t", comment.char="", row.names=1)
+mapping <- read.table(sprintf("%s/NAFLDomics_Mapping.combined.txt", data_dir), header=T, as.is=T, sep="\t", comment.char="", row.names=1)
 metadata <- read.delim(sprintf("%s/metadata.052218.txt", data_dir), header=T, sep="\t", comment.char=""); colnames(metadata)[1] <- "StudyID"
 # impute missing BMI values
 metadata$BMI....kg.m.2. <- as.numeric(as.character(metadata$BMI....kg.m.2.))
