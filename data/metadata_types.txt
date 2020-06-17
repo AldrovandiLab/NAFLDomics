@@ -4,4 +4,4 @@ StudyID	character		no		no
 Cohort	ordered	NMLBMI,ObeseNML,NAFLD,NASH	yes		yes
 BMI	numeric		yes		no
 Age	numeric		yes		no
-Gender	factor	F	yes		no
+Sex	factor	F	yes		no
