@@ -32,6 +32,7 @@ out_dir <- "data/" # change appropriately
 
 distance_metrics <- c("bray", "jaccard", "jsd")
 alpha_metrics <- c("Chao1", "Shannon", "Simpson", "Observed")
+siglevel <- 0.1
 
 #########################################################################################################
 ## load mapping files
@@ -309,7 +310,7 @@ for (psvar in c("OralSwab", "RectalSwab")){
     ## p-value adjust
     res$padj <- p.adjust(res$pvalue, method="fdr")
     res <- res[order(res$padj, decreasing=F),]
-    resSig <- subset(res, padj<0.05)
+    resSig <- subset(res, padj<siglevel)
     write.table(res, file=sprintf("%s/ZINB_Cohort.%s.%s.txt", out_dir, psvar, level), quote=F, sep="\t", row.names=F, col.names=T)
   }
 }
@@ -470,10 +471,60 @@ for (st in c("fecal", "plasma")) {
 		## p-value adjust
 		res$padj <- p.adjust(res$pvalue, method="fdr")
 		res <- res[order(res$padj, decreasing=F),]
-		resSig <- subset(res, padj<0.05)
+		resSig <- subset(res, padj<siglevel)
 		write.table(res, file=sprintf("%s/METABOLITE_linear_regression.%s.%s.txt", out_dir, st, mlevel), quote=F, sep="\t", row.names=F, col.names=T)
 	}
 }
+
+## linear regression of METABOLITE data ~ [ALT/AST/GGT] + BMI + Age + Sex
+for (st in c("fecal", "plasma")) {
+	for (mlevel in metabolite_levels) {
+		data <- df.metabolon[[st]][[mlevel]]
+		mapping.sel <- subset(as(sample_data(ps.relative), "data.frame"), StudyID %in% rownames(data))
+		out <- mclapply(colnames(data), function(metabolite) {
+			df <- melt(data[,metabolite])	
+			df[, "Cohort"] <- unlist(sample_data(ps)[match(rownames(df), sample_data(ps)$StudyID), "Cohort"])
+			df[, "BMI"] <- unlist(sample_data(ps)[match(rownames(df), sample_data(ps)$StudyID), "BMI"])
+			df[, "Age"] <- unlist(sample_data(ps)[match(rownames(df), sample_data(ps)$StudyID), "Age"])
+			df[, "Sex"] <- unlist(sample_data(ps)[match(rownames(df), sample_data(ps)$StudyID), "Sex"])
+			res <- {}
+			for (mvar in c("ALT", "AST", "GGT")) {
+				df[, mvar] <- unlist(sample_data(ps)[match(rownames(df), sample_data(ps)$StudyID), mvar])
+				tt <- try(m <- lm(as.formula(sprintf("value ~ %s + BMI + Age + Sex", mvar)), data = df), silent=T)
+				if (class(tt) == "lm") {
+				  coef <- summary(m)$coefficients # rows are [(Intercept), comparisons], columns are [Estimate, SE, Z, pval]
+				  tmp <- cbind(metabolite, "Linear regression", rownames(coef), coef)
+				  res <- rbind(res, tmp)
+				}
+			}
+#			print(sprintf("finished %s", metabolite))
+			res
+		}, mc.cores=16)
+		res <- as.data.frame(do.call(rbind, out))
+		colnames(res) <- c("metabolite", "method", "coefficient", "Estimate", "SE", "Z", "pvalue")
+		res <- subset(res, coefficient %in% c("ALT", "AST", "GGT")) # remove extra terms before FDR correction
+		res$pvalue <- as.numeric(as.character(res$pvalue))
+		res$Z <- as.numeric(as.character(res$Z))
+		## p-value adjust
+		res$padj <- p.adjust(res$pvalue, method="fdr")
+		res <- res[order(res$padj, decreasing=F),]
+		res$dir <- ifelse(res$padj < siglevel, ifelse(sign(res$Z)==1, "up", "down"), "NS")
+		resSig <- subset(res, padj<siglevel)
+		write.table(res, file=sprintf("%s/METABOLITE_linear_regression_liver_enzymes.%s.%s.txt", out_dir, st, mlevel), quote=F, sep="\t", row.names=F, col.names=T)
+		
+		## heatmap with significant associations
+		if (nrow(resSig) > 0) {
+			df <- dcast(resSig, metabolite ~ coefficient, value.var="Z")
+			rownames(df) <- df$metabolite; df <- df[,-1]
+			df[which(is.na(df), arr.ind=T)] <- 0
+			df.note <- dcast(resSig, metabolite ~ coefficient, value.var="dir")
+			rownames(df.note) <- df.note$metabolite; df.note <- df.note[,-1]
+			df.note[which(!is.na(df.note), arr.ind=T)] <- "*"; df.note[which(is.na(df.note), arr.ind=T)] <- ""
+		  try(heatmap.2(as.matrix(df), Rowv=T, Colv=T, dendrogram="both", trace="none", cellnote=df.note, notecex=1, notecol="red", col=colorRampPalette(c("blue","white","red"))(150), margins=c(5,20), cexCol=1, cexRow=0.8, main=sprintf("ALT/AST/GGT associations (%s, %s)", st, mlevel)), silent=T)
+		}
+	}
+}
+
 
 ## ordination (t-SNE, PCA) and PERMANOVA
 set.seed(112917)
@@ -612,7 +663,7 @@ for (st in c("fecal", "plasma")) {
 				df$OTU_string <- sprintf("%s (Z=%.4g, padj=%.4g)", df$OTU, df$Z, df$padj)
 			}
 			df$superpathway[which(is.na(df$superpathway))] <- "NOT_METABOLITE"
-			df$sig <- ifelse(df$padj < 0.1, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
+			df$sig <- ifelse(df$padj < siglevel, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
 			p <- ggplot(df, aes(x=OTU, y=importance, label=OTU, fill=superpathway)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU_string, color=sig), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory %s", mvar_level, mlevel, st)) + scale_fill_manual(values=cols.superpathway) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
 			print(p)
 			# shading rectangles of importance
@@ -744,7 +795,7 @@ for (st in c("fecal", "plasma")) {
 				df$OTU_string <- sprintf("%s (Z=%.4g, padj=%.4g)", df$OTU, df$Z, df$padj)
 			}
 			df$superpathway[which(is.na(df$superpathway))] <- "NOT_METABOLITE"
-			df$sig <- ifelse(df$padj < 0.1, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
+			df$sig <- ifelse(df$padj < siglevel, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
 			p <- ggplot(df, aes(x=OTU, y=importance, label=OTU, fill=superpathway)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU_string, color=sig), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory %s", mvar_level, mlevel, st)) + scale_fill_manual(values=cols.superpathway) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
 			print(p)
 			# shading rectangles of importance
@@ -856,7 +907,7 @@ for (st in c("fecal", "plasma")) {
 		res <- res[grep("Cohort", res$coefficient),]
 		res <- aggregate(padj ~ metabolite, res, min); rownames(res) <- res$metabolite
 		df$padj <- res[as.character(df$OTU), "padj"]
-		df$sig <- ifelse(df$padj < 0.1, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
+		df$sig <- ifelse(df$padj < siglevel, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
 		if (mlevel == "BIOCHEMICAL") {
 			df$subpathway <- metabolon_map[df$metabolite_name, "SUB.PATHWAY"]
 			df$superpathway <- metabolon_map[df$metabolite_name, "SUPER.PATHWAY"]
@@ -1003,7 +1054,7 @@ for (st in c("fecal", "plasma")) {
 				df$OTU_string <- sprintf("%s (Z=%.4g, padj=%.4g)", df$OTU, df$Z, df$padj)
 			}
 			df$superpathway[which(is.na(df$superpathway))] <- "NOT_METABOLITE"
-			df$sig <- ifelse(df$padj < 0.1, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
+			df$sig <- ifelse(df$padj < siglevel, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
 			p <- ggplot(df, aes(x=OTU, y=importance, label=OTU, fill=superpathway)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU_string, color=sig), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory %s", mvar_level, mlevel, st)) + scale_fill_manual(values=cols.superpathway) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
 			print(p)
 			# shading rectangles of importance
@@ -1158,7 +1209,7 @@ for (st in c("fecal", "plasma")) {
 		## p-value adjust
 		res$padj <- p.adjust(res$pvalue, method="fdr")
 		res <- res[order(res$padj, decreasing=F),]
-		resSig <- subset(res, padj<0.05)
+		resSig <- subset(res, padj<siglevel)
 		write.table(res, file=sprintf("%s/BIOPSY_METABOLITE_linear_regression.%s.%s.txt", out_dir, st, mlevel), quote=F, sep="\t", row.names=F, col.names=T)
 	}
 }
@@ -1315,7 +1366,7 @@ for (st in c("fecal", "plasma")) {
 				df$OTU_string <- sprintf("%s (Z=%.4g, padj=%.4g)", df$OTU, df$Z, df$padj)
 			}
 			df$superpathway[which(is.na(df$superpathway))] <- "NOT_METABOLITE"
-			df$sig <- ifelse(df$padj < 0.1, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
+			df$sig <- ifelse(df$padj < siglevel, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
 			p <- ggplot(df, aes(x=OTU, y=importance, label=OTU, fill=superpathway)) + geom_bar(position=position_dodge(), stat="identity", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU_string, color=sig), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory %s", biopsy_variable, mlevel, st)) + scale_fill_manual(values=cols.superpathway) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
 			print(p)
 			# violin plots of relative abundance
@@ -1361,7 +1412,7 @@ for (cutoff in c(0.001, 0.002, 0.005)) {
 #			df <- log2(df)
 			df[which(is.na(df), arr.ind=T)] <- 0 # NA -> 0
 			res <- read.table(sprintf("%s/BIOPSY_METABOLITE_linear_regression.%s.%s.txt", out_dir, st, mlevel), header=T, sep="\t", as.is=T, quote=""); colnames(res)[1] <- "BiopsyVariable"
-			resSig <- subset(res, padj<0.1)
+			resSig <- subset(res, padj<siglevel)
 			df.sig <- matrix("", nrow=nrow(df), ncol=ncol(df)); rownames(df.sig) <- rownames(df); colnames(df.sig) <- colnames(df)
 			if (nrow(resSig)>0) {
 				for (i in 1:length(resSig)) {
@@ -2751,7 +2802,7 @@ ps.deseq2 <- ps; sample_data(ps.deseq2)$Cohort <- factor(as.character(sample_dat
 dds <- phyloseq_to_deseq2(ps.deseq2, ~ Cohort + BMI + Age + Sex)
 dds <- DESeq(dds)
 res <- results(dds, name="Cohort_NASH_vs_NMLBMI")
-resSig <- as.data.frame(subset(res, padj<0.1)); resSig <- resSig[order(resSig$log2FoldChange),]; resSig$taxa <- rownames(resSig); resSig$taxa <- factor(resSig$taxa, levels=resSig$taxa); resSig$hdir <- 1-ceiling(sign(resSig$log2FoldChange)/2)
+resSig <- as.data.frame(subset(res, padj<siglevel)); resSig <- resSig[order(resSig$log2FoldChange),]; resSig$taxa <- rownames(resSig); resSig$taxa <- factor(resSig$taxa, levels=resSig$taxa); resSig$hdir <- 1-ceiling(sign(resSig$log2FoldChange)/2)
 p <- ggplot(resSig, aes(x=taxa, y=log2FoldChange)) + geom_bar(stat="identity", fill="#aaaaaa") + geom_text(aes(label=taxa), y=0, size=2, hjust=0.5) + coord_flip() + theme_classic() + ggtitle(sprintf("DESeq2 hits")) + theme(axis.text.y=element_blank())
 print(p)
 write.table(res, file=sprintf("%s/Shotgun_DESeq2.Species.txt", out_dir), quote=F, sep="\t", row.names=T, col.names=T)
@@ -2844,7 +2895,7 @@ for (mvar_level in setdiff(levels(mapping.sel[, "Cohort"]), "NMLBMI")) {
 	res <- read.table(sprintf("%s/Shotgun_DESeq2.Species.txt", out_dir), header=T, sep="\t", as.is=T, quote="", comment.char="")
 	df$log2FoldChange <- res[as.character(df$OTU), "log2FoldChange"]; df$padj <- res[as.character(df$OTU), "padj"]
 	df$OTU_string <- sprintf("%s (log2FC=%.4g, padj=%.4g)", rownames(df), df$log2FoldChange, df$padj)
-	df$sig <- ifelse(df$padj < 0.1, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
+	df$sig <- ifelse(df$padj < siglevel, "sig", "ns"); df$sig[which(is.na(df$sig))] <- "ns"
 	p <- ggplot(df, aes(x=OTU, y=importance, label=OTU)) + geom_bar(position=position_dodge(), stat="identity", fill="#999999", color=NA) + geom_errorbar(aes(ymin=importance-sd, ymax=importance+sd), width=.2, position=position_dodge(.9)) + coord_flip() + geom_text(aes(x=OTU, y=0, label=OTU_string, color=sig), size=3, hjust=0) + ggtitle(sprintf("%s - %s explanatory", mvar_level, level)) + scale_color_manual(values=cols.sig) + theme(axis.text.y=element_blank())
 	print(p)
 	
