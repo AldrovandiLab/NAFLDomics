@@ -24,6 +24,9 @@ library(stringi)
 library(Rtsne)
 library(ggfortify)
 library(mixOmics)
+library(twang)
+library(ranger)
+library(labdsv)
 
 source("mcc.R")
 source("utils.R")
@@ -437,9 +440,65 @@ df <- subset(df, !is.na(df$Cohort))
 test <- kruskal.test(BFLogRatio ~ Cohort, df)
 p <- ggplot(df, aes(x=Cohort, y=BFLogRatio)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("BFLogRatio by Cohort (KW p=%.4g)", test$p.value))
 print(p)
+comps <- as.data.frame(t(combn(levels(df$Cohort), 2)))
+for (i in 1:nrow(comps)) {
+	comp <- unlist(comps[i,])
+	df2 <- subset(df, Cohort %in% comp)
+	df2$Cohort <- droplevels(df2$Cohort)
+	test <- wilcox.test(BFLogRatio ~ Cohort, df2)
+	p <- ggplot(df2, aes(x=Cohort, y=BFLogRatio)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("BFLogRatio %s vs %s (wilcox p=%.4g)", comp[1], comp[2], test$p.value))
+	print(p)
+}
 
+## alpha diversity
+ps.selr <- subset_samples(ps.rarefied, SampleType2=="RectalSwab")
+adiv <- estimate_richness(ps.selr)
+adiv$SampleID <- rownames(adiv)
+adiv$Cohort <- mapping.sel[adiv$SampleID, "Cohort"]
+comps <- as.data.frame(t(combn(levels(df$Cohort), 2)))
+for (am in alpha_metrics) {
+	for (i in 1:nrow(comps)) {
+		comp <- unlist(comps[i,])
+		df2 <- subset(adiv, Cohort %in% comp)
+		df2$Cohort <- droplevels(df2$Cohort)
+		test <- wilcox.test(as.formula(sprintf("%s ~ Cohort", am)), df2)
+		p <- ggplot(df2, aes_string(x="Cohort", y=am)) + geom_boxplot() + theme_classic() + ggtitle(sprintf("%s %s vs %s (wilcox p=%.4g)", am, comp[1], comp[2], test$p.value))
+		print(p)
+	}
+}
 
-
+## indicator species analysis
+for (psvar in c("OralSwab", "RectalSwab")){
+	ps.sel <- subset_samples(ps.relative, SampleType2==psvar)
+	mapping.sel <- subset(mapping, SampleType2==psvar)
+	for (level in c("Species"){
+	  otu.filt <- as.data.frame(otu_table(ps.sel))
+	  otu.filt.abundance <- normalizeByCols(otu.filt)
+	  otu.filt[[level]] <- getTaxonomy(otus=rownames(otu.filt), tax_tab=tax_table(ps.sel), level=level)
+	  otu.filt.abundance[[level]] <- getTaxonomy(otus=rownames(otu.filt), tax_tab=tax_table(ps.sel), level=level)
+	  # rename Prevotella_6, etc -> Prevotella
+	  otu.filt[[level]] <- gsub("_\\d$", "", otu.filt[[level]])
+	  otu.filt.abundance[[level]] <- gsub("_\\d$", "", otu.filt.abundance[[level]])
+	  agg <- aggregate(as.formula(sprintf(". ~ %s", level)), otu.filt, sum)
+	  agg.abundance <- aggregate(as.formula(sprintf(". ~ %s", level)), otu.filt.abundance, sum)
+	  lvl <- agg[[level]]
+	  lvl.abundance <- agg.abundance[[level]]
+	  agg <- agg[,-1]
+	  agg.abundance <- agg.abundance[,-1]
+	  rownames(agg) <- lvl
+	  rownames(agg.abundance) <- lvl.abundance
+	  agg.abundance <- agg.abundance[which(rowSums(agg.abundance > 0.01) >= ceiling(ncol(agg.abundance)/10)),]
+	  agg <- agg[rownames(agg.abundance),]
+	  res.mean <- {}; res.sd <- {}
+		data.sel <- as.data.frame(t(agg))
+		data.sel <- as.matrix(data.sel)
+		response <- mapping.sel[rownames(data.sel), "Cohort"]; names(response) <- rownames(data.sel)
+		tmp <- indval(data.sel, response, numitr=10000)
+		res <- data.frame(taxa=names(tmp$pval), indval=tmp$indcls, maxcls=tmp$maxcls, pval=tmp$pval)
+		res$padj <- p.adjust(res$pval, method="fdr")
+		res <- res[order(res$pval, decreasing=F),]
+	}
+}
 
 
 ###############################################################################################################

@@ -76,7 +76,11 @@ renameLevelsWithCounts <- function(fvec, originalLevelsAsNames=FALSE) {
 
 # get selected taxonomy
 # DEFAULT: do not include entries that are not classified to the requested level (return NA instead)
-getTaxonomy <- function(otus, tax_tab, level, na_str = c("unclassified", "unidentified", "NA", ""), includeUnclassified = FALSE) {
+getTaxonomy <- function(otus, tax_tab, level, na_str = c("unclassified", "unidentified", "NA", "", "uncultured"), includeUnclassified = TRUE) {
+	# coerce taxonomyTable to data.frame (see https://github.com/joey711/phyloseq/issues/983), otherwise hangs as of phyloseq v1.26
+	if (class(tax_tab) == "taxonomyTable") {
+		tax_tab <- as.data.frame(tax_tab@.Data)
+	}
 	ranks <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
 	sel <- ranks[1:match(level, ranks)]
 	inds <- apply(tax_tab[otus,sel], 1, function(x) max(which(!(x %in% na_str | is.na(x)))))
@@ -100,5 +104,68 @@ getTaxonomy <- function(otus, tax_tab, level, na_str = c("unclassified", "uniden
 }
 
 
+## modified rgcv function from 'spm' package to enable functionality of rfcv from 'randomForest'
+## do cross-validation along feature selection axis in addition to sample-wise cross-validation
+rgcv2 <- function (trainx, trainy, cv.fold = 10, scale = "log", step = 0.5, mtry = function(p) max(1, floor(sqrt(p))), num.trees = 500, min.node.size = NULL, num.threads = NULL, verbose = FALSE, recursive = FALSE, ...) {
+	recursive.importance <- ifelse(recursive, "permutation", "none")
+	classRF <- is.factor(trainy)
+	n <- nrow(trainx)
+	p <- ncol(trainx)
+	if (scale == "log") {
+		k <- floor(log(p, base = 1/step))
+		n.var <- round(p * step^(0:(k - 1)))
+		same <- diff(n.var) == 0
+		if (any(same)) {
+		  n.var <- n.var[-which(same)]
+		}
+		if (!1 %in% n.var) { 
+		  n.var <- c(n.var, 1)
+		}
+	} else {
+		n.var <- seq(from = p, to = 1, by = step)
+	}
+	k <- length(n.var)
+	cv.pred <- vector(k, mode = "list")
+	for (i in 1:k) cv.pred[[i]] <- trainy
+	if (classRF) {
+		f <- trainy
+	} else {
+		f <- cut(trainy, c(-Inf, stats::quantile(trainy, 1:4/5), Inf))
+	}
+	nlvl <- table(f)
+	idx <- numeric(n)
+	for (i in 1:length(nlvl)) {
+		  idx[which(f == levels(f)[i])] <- sample(rep(1:cv.fold, 
+		      length = nlvl[i]))
+	}
+	for (i in 1:cv.fold) {
+		  data.dev <- trainx[idx != i, , drop = FALSE]
+		  data.pred <- trainx[idx == i, , drop = FALSE]
+		  response.dev <- trainy[idx != i]
+		  all.rf <- ranger::ranger(x = data.dev, y=response.dev, mtry = mtry(p), 
+		      num.trees = num.trees, min.node.size = min.node.size, 
+		      num.threads = num.threads, verbose = verbose, importance="permutation")
+		  cv.pred[[1]][idx == i] <- stats::predict(all.rf, data = data.pred)$predictions
+		  impvar <- (1:p)[order(importance(all.rf, type = "permutation"), decreasing = TRUE)]
+		  for (j in 2:k) {
+		    imp.idx <- impvar[1:n.var[j]]
+		    data.dev.sub <- data.dev[, imp.idx, drop=F]
+		    sub.rf <- ranger::ranger(x = data.dev.sub, y=response.dev, mtry = mtry(n.var[j]), 
+		      num.trees = num.trees, min.node.size = min.node.size, 
+		      num.threads = num.threads, verbose = verbose, importance=recursive.importance)
+		    cv.pred[[j]][idx == i] <- stats::predict(sub.rf, data = data.pred[, imp.idx, drop=F])$predictions
+		    if (recursive) {
+		      impvar <- (1:length(imp.idx))[order(importance(sub.rf, type = "permutation"), decreasing = TRUE)]
+		    }
+		  }
+	}
+	if (classRF) {
+		error.cv <- sapply(cv.pred, function(x) mean(trainy != x))
+	} else {
+		error.cv <- sapply(cv.pred, function(x) mean((trainy - x)^2))
+	}
+	names(error.cv) <- names(cv.pred) <- n.var
+	list(n.var = n.var, error.cv = error.cv, predicted = cv.pred)
 
+}
 
